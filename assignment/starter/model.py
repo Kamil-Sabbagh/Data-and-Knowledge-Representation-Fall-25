@@ -1,5 +1,6 @@
 """
 Graph Attention Network (GAT) implementation using PyTorch Geometric.
+Complete Solution for Testing
 """
 
 import torch
@@ -46,27 +47,20 @@ class GATLayer(MessagePassing):
         self.dropout = dropout
         self.negative_slope = negative_slope
 
-        # TODO: Initialize linear transformation
-        # Hint: Use nn.Linear or nn.Parameter for weight matrix W
-        # Shape should be [in_channels, heads * out_channels]
-        self.lin = None  # REPLACE THIS
+        # Linear transformation
+        self.lin = Linear(in_channels, heads * out_channels, bias=False)
 
-        # TODO: Initialize attention parameters
-        # Hint: Create learnable vectors for source and target attention
-        # att_src shape: [1, heads, out_channels]
-        # att_dst shape: [1, heads, out_channels]
-        self.att_src = None  # REPLACE THIS
-        self.att_dst = None  # REPLACE THIS
+        # Attention parameters
+        self.att_src = Parameter(torch.Tensor(1, heads, out_channels))
+        self.att_dst = Parameter(torch.Tensor(1, heads, out_channels))
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        """
-        Initialize learnable parameters.
-
-        TODO: Use appropriate initialization (e.g., Xavier/Glorot)
-        """
-        pass  # IMPLEMENT THIS
+        """Initialize parameters using Glorot/Xavier initialization."""
+        nn.init.xavier_uniform_(self.lin.weight)
+        nn.init.xavier_uniform_(self.att_src)
+        nn.init.xavier_uniform_(self.att_dst)
 
     def forward(
         self,
@@ -74,26 +68,23 @@ class GATLayer(MessagePassing):
         edge_index: torch.Tensor,
         size: tuple = None
     ) -> torch.Tensor:
-        """
-        Forward pass of the GAT layer.
+        """Forward pass."""
+        # Apply linear transformation
+        x = self.lin(x)  # [N, heads * out_channels]
 
-        Args:
-            x: Node feature matrix of shape [num_nodes, in_channels]
-            edge_index: Edge indices of shape [2, num_edges]
-            size: Size of source and target nodes (for bipartite graphs)
+        # Reshape for multi-head attention
+        x = x.view(-1, self.heads, self.out_channels)  # [N, heads, out_channels]
 
-        Returns:
-            Updated node features of shape:
-                - [num_nodes, heads * out_channels] if concat=True
-                - [num_nodes, out_channels] if concat=False
-        """
-        # TODO: Implement forward pass
-        # Step 1: Apply linear transformation to node features
-        # Step 2: Reshape for multi-head attention
-        # Step 3: Initiate message passing via self.propagate()
-        # Step 4: Handle concatenation/averaging of heads
+        # Propagate messages
+        out = self.propagate(edge_index, x=x, size=size)  # [N, heads, out_channels]
 
-        pass  # IMPLEMENT THIS
+        # Handle multi-head concatenation/averaging
+        if self.concat:
+            out = out.view(-1, self.heads * self.out_channels)  # [N, heads * out_channels]
+        else:
+            out = out.mean(dim=1)  # [N, out_channels]
+
+        return out
 
     def message(
         self,
@@ -103,29 +94,21 @@ class GATLayer(MessagePassing):
         ptr: torch.Tensor,
         size_i: int
     ) -> torch.Tensor:
-        """
-        Construct messages from source nodes to target nodes.
+        """Compute attention-weighted messages."""
+        # Compute attention logits
+        alpha_src = (x_i * self.att_src).sum(dim=-1)  # [E, heads]
+        alpha_dst = (x_j * self.att_dst).sum(dim=-1)  # [E, heads]
+        alpha = alpha_src + alpha_dst  # [E, heads]
+        alpha = F.leaky_relu(alpha, self.negative_slope)
 
-        Args:
-            x_j: Source node features [num_edges, heads, out_channels]
-            x_i: Target node features [num_edges, heads, out_channels]
-            index: Target node indices for each edge
-            ptr: Compressed index pointer (CSR format)
-            size_i: Number of target nodes
+        # Normalize attention coefficients
+        alpha = softmax(alpha, index, ptr, size_i)  # [E, heads]
 
-        Returns:
-            Attention-weighted messages [num_edges, heads, out_channels]
-        """
-        # TODO: Implement attention mechanism
-        # Step 1: Compute attention logits e_ij = LeakyReLU(a^T [h_i || h_j])
-        #         Use self.att_src and self.att_dst
-        # Step 2: Normalize attention coefficients using softmax
-        #         Hint: Use torch_geometric.utils.softmax with index parameter
-        # Step 3: Apply dropout to attention coefficients during training
-        # Step 4: Weight source features by attention coefficients
-        # Step 5: Return weighted messages
+        # Apply dropout
+        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
 
-        pass  # IMPLEMENT THIS
+        # Weight messages by attention
+        return x_j * alpha.unsqueeze(-1)  # [E, heads, out_channels]
 
     def aggregate(
         self,
@@ -134,23 +117,8 @@ class GATLayer(MessagePassing):
         ptr: torch.Tensor = None,
         dim_size: int = None
     ) -> torch.Tensor:
-        """
-        Aggregate messages from neighbors.
-
-        Args:
-            inputs: Messages to aggregate [num_edges, heads, out_channels]
-            index: Target node indices for each message
-            ptr: Compressed index pointer (CSR format)
-            dim_size: Number of target nodes
-
-        Returns:
-            Aggregated messages [num_nodes, heads, out_channels]
-        """
-        # TODO: Implement aggregation
-        # Hint: Use torch_scatter.scatter to sum messages for each target node
-        # Use scatter(inputs, index, dim=0, dim_size=dim_size, reduce='sum')
-
-        pass  # IMPLEMENT THIS
+        """Aggregate messages using sum."""
+        return torch_scatter.scatter(inputs, index, dim=0, dim_size=dim_size, reduce='sum')
 
 
 class GNNStack(nn.Module):
@@ -184,50 +152,39 @@ class GNNStack(nn.Module):
         self.heads = heads
         self.dropout = dropout
 
-        # TODO: Build layers
-        # Hint: Use nn.ModuleList to store GAT layers
-        # - First layer: input_dim -> hidden_dim, with 'heads' heads, concat=True
-        # - Middle layers: heads*hidden_dim -> hidden_dim, with 'heads' heads, concat=True
-        # - Last layer: heads*hidden_dim -> output_dim, with 1 head, concat=False
-
         self.convs = nn.ModuleList()
-        # IMPLEMENT LAYER CONSTRUCTION HERE
+
+        # First layer
+        self.convs.append(
+            GATLayer(input_dim, hidden_dim, heads=heads, concat=True, dropout=dropout)
+        )
+
+        # Hidden layers
+        for _ in range(num_layers - 2):
+            self.convs.append(
+                GATLayer(heads * hidden_dim, hidden_dim, heads=heads, concat=True, dropout=dropout)
+            )
+
+        # Output layer
+        self.convs.append(
+            GATLayer(heads * hidden_dim, output_dim, heads=1, concat=False, dropout=dropout)
+        )
 
     def forward(
         self,
         x: torch.Tensor,
         edge_index: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Forward pass through the GNN stack.
+        """Forward pass through GAT layers."""
+        for i, conv in enumerate(self.convs[:-1]):
+            x = conv(x, edge_index)
+            x = F.elu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
 
-        Args:
-            x: Node features [num_nodes, input_dim]
-            edge_index: Edge indices [2, num_edges]
-
-        Returns:
-            Log-probabilities [num_nodes, output_dim]
-        """
-        # TODO: Implement forward pass
-        # For each layer except the last:
-        #   - Apply GAT layer
-        #   - Apply ELU activation
-        #   - Apply dropout
-        # For the last layer:
-        #   - Apply GAT layer
-        #   - Apply log_softmax
-
-        pass  # IMPLEMENT THIS
+        # Final layer
+        x = self.convs[-1](x, edge_index)
+        return F.log_softmax(x, dim=1)
 
     def loss(self, pred: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
-        """
-        Compute negative log-likelihood loss.
-
-        Args:
-            pred: Log-probabilities [num_nodes, num_classes]
-            label: Ground truth labels [num_nodes]
-
-        Returns:
-            Loss value (scalar tensor)
-        """
+        """Compute negative log-likelihood loss."""
         return F.nll_loss(pred, label)

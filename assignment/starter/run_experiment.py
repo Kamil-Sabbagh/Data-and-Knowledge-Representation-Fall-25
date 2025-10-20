@@ -1,5 +1,6 @@
 """
 Main experiment script for training GAT on Cora dataset.
+Complete Solution for Testing
 
 Usage:
     python run_experiment.py --seed 42 --epochs 200 --lr 0.005
@@ -61,36 +62,66 @@ def main():
     device = get_device()
     print(f"Using device: {device}")
 
-    # TODO: Load data
-    # Hint: Use load_cora() from data_utils
-    # Move data to device: data = data.to(device)
+    # Load data
+    data = load_cora(root=args.data_root)
+    data = data.to(device)
 
-    # TODO: Initialize model
-    # Hint: Determine input_dim from data.num_features
-    #       Determine output_dim from data.y.max().item() + 1
-    # Create GNNStack with args.hidden_dim, args.num_layers, args.heads, args.dropout
-    # Move model to device: model = model.to(device)
+    # Initialize model
+    input_dim = data.num_features
+    output_dim = data.y.max().item() + 1
 
-    # TODO: Initialize optimizer
-    # Hint: Use torch.optim.Adam with model.parameters()
-    #       Set lr=args.lr and weight_decay=args.weight_decay
+    model = GNNStack(
+        input_dim=input_dim,
+        hidden_dim=args.hidden_dim,
+        output_dim=output_dim,
+        num_layers=args.num_layers,
+        heads=args.heads,
+        dropout=args.dropout
+    )
+    model = model.to(device)
 
-    # TODO: Training loop
-    # For each epoch:
-    #   1. Call train_step() and get loss and train accuracy
-    #   2. Call eval_step() with data.val_mask to get val accuracy
-    #   3. Every 20 epochs, print:
-    #      f"Epoch {epoch:03d}, Loss: {loss:.4f}, Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}"
+    # Initialize optimizer
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay
+    )
 
-    # TODO: Final evaluation on test set
-    # Call eval_step() with data.test_mask
-    # Print: f"Test Accuracy: {test_acc:.4f}"
+    # Training loop
+    best_val_acc = 0.0
+    best_test_acc = 0.0
 
-    # TODO: Output machine-readable JSON
-    # Create a dictionary with the following keys:
+    for epoch in range(1, args.epochs + 1):
+        # Training step
+        train_result = train_step(model, data, optimizer, device)
+        loss = train_result['loss']
+        train_acc = train_result['accuracy']
+
+        # Validation step
+        val_result = eval_step(model, data, data.val_mask, device)
+        val_acc = val_result['accuracy']
+
+        # Track best validation accuracy
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            # Evaluate on test set when validation improves
+            test_result = eval_step(model, data, data.test_mask, device)
+            best_test_acc = test_result['accuracy']
+
+        # Print progress every 20 epochs
+        if epoch % 20 == 0 or epoch == 1:
+            print(f"Epoch {epoch:03d}, Loss: {loss:.4f}, Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}")
+
+    # Final evaluation on test set
+    test_result = eval_step(model, data, data.test_mask, device)
+    final_test_acc = test_result['accuracy']
+
+    print(f"Test Accuracy: {final_test_acc:.4f}")
+
+    # Output machine-readable JSON
     output = {
         "split": "test",
-        "accuracy": 0.0,  # REPLACE with actual test accuracy
+        "accuracy": round(final_test_acc, 4),
         "seed": args.seed,
         "config": {
             "heads": args.heads,

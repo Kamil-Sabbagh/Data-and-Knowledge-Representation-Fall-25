@@ -1,5 +1,6 @@
 """
 Training and evaluation functions for GNN models.
+Complete Solution for Testing
 """
 
 import torch
@@ -27,17 +28,26 @@ def train_step(
             - 'loss': float, the training loss value
             - 'accuracy': float, the training accuracy
     """
-    # TODO: Implement training step
-    # Step 1: Set model to training mode
-    # Step 2: Zero gradients
-    # Step 3: Forward pass
-    # Step 4: Compute loss on training nodes (use data.train_mask)
-    # Step 5: Backward pass
-    # Step 6: Update parameters
-    # Step 7: Compute training accuracy
-    # Step 8: Return dictionary with loss and accuracy
+    model.train()
+    optimizer.zero_grad()
 
-    pass  # IMPLEMENT THIS
+    # Forward pass
+    out = model(data.x, data.edge_index)
+
+    # Compute loss on training nodes
+    loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])
+
+    # Backward pass
+    loss.backward()
+    optimizer.step()
+
+    # Compute training accuracy
+    train_acc = compute_accuracy(out, data.y, data.train_mask)
+
+    return {
+        'loss': loss.item(),
+        'accuracy': train_acc
+    }
 
 
 @torch.no_grad()
@@ -60,14 +70,17 @@ def eval_step(
         Dictionary with keys:
             - 'accuracy': float, the accuracy on masked nodes
     """
-    # TODO: Implement evaluation step
-    # Step 1: Set model to evaluation mode
-    # Step 2: Forward pass
-    # Step 3: Compute predictions (argmax of log-probabilities)
-    # Step 4: Compute accuracy on masked nodes
-    # Step 5: Return dictionary with accuracy
+    model.eval()
 
-    pass  # IMPLEMENT THIS
+    # Forward pass
+    out = model(data.x, data.edge_index)
+
+    # Compute accuracy on masked nodes
+    accuracy = compute_accuracy(out, data.y, mask)
+
+    return {
+        'accuracy': accuracy
+    }
 
 
 def compute_accuracy(pred: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor) -> float:
