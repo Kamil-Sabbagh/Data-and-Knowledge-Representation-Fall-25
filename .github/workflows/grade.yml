@@ -1,0 +1,210 @@
+name: Autograde Assignment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  check-attempts:
+    runs-on: ubuntu-latest
+    outputs:
+      attempts: ${{ steps.count.outputs.attempts }}
+      exhausted: ${{ steps.count.outputs.exhausted }}
+    steps:
+      - name: Count attempts from labels
+        id: count
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            const attemptLabels = labels.filter(l => l.startsWith('attempt-'));
+            const attempts = attemptLabels.length > 0 ? Math.max(...attemptLabels.map(l => parseInt(l.split('-')[1]))) : 0;
+            const exhausted = attempts >= 3;
+
+            core.setOutput('attempts', attempts);
+            core.setOutput('exhausted', exhausted);
+
+            console.log(`Current attempts: ${attempts}`);
+            console.log(`Exhausted: ${exhausted}`);
+
+  grade:
+    runs-on: ubuntu-latest
+    needs: check-attempts
+    if: needs.check-attempts.outputs.exhausted == 'false'
+
+    steps:
+      - name: Checkout student submission
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install student dependencies
+        run: |
+          cd assignment/starter
+          pip install -r requirements.txt
+          pip install pytest pytest-json-report
+
+      - name: Fetch private grader
+        run: |
+          # In production, use a GitHub token to fetch from private repo
+          # git clone https://${{ secrets.GRADER_TOKEN }}@github.com/Kamil-Sabbagh/dkr-autograder-private.git grader
+          # For now, use the grader from grader_private directory
+          echo "Using local grader for demonstration"
+
+      - name: Run grading tests
+        id: grading
+        continue-on-error: true
+        run: |
+          cd grader_private
+          python test_grader.py > /tmp/grade_result.json
+
+      - name: Parse grade results
+        id: parse_grade
+        run: |
+          if [ -f /tmp/grade_result.json ]; then
+            GRADE=$(cat /tmp/grade_result.json)
+            echo "GRADE<<EOF" >> $GITHUB_OUTPUT
+            echo "$GRADE" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "GRADE={\"score\": 0, \"max_score\": 100, \"feedback\": \"Grading failed to execute\"}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update attempt label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const currentAttempts = parseInt('${{ needs.check-attempts.outputs.attempts }}');
+            const newAttempt = currentAttempts + 1;
+            const newLabel = `attempt-${newAttempt}`;
+
+            // Remove old attempt labels
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            for (const label of labels) {
+              if (label.startsWith('attempt-') && label !== newLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  name: label
+                });
+              }
+            }
+
+            // Add new attempt label
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: [newLabel]
+            });
+
+            // Add exhausted label if this was the 3rd attempt
+            if (newAttempt >= 3) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                labels: ['attempts-exhausted']
+              });
+            }
+
+      - name: Post grade comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const gradeData = JSON.parse(`${{ steps.parse_grade.outputs.GRADE }}`);
+            const attemptNum = parseInt('${{ needs.check-attempts.outputs.attempts }}') + 1;
+            const maxAttempts = 3;
+            const remainingAttempts = maxAttempts - attemptNum;
+
+            const comment = `## 🤖 Autograder Results
+
+**Submission Attempt:** ${attemptNum}/${maxAttempts}
+**Remaining Attempts:** ${remainingAttempts}
+
+### 📊 Score: ${gradeData.score}/${gradeData.max_score}
+
+### 📝 Detailed Feedback
+
+\`\`\`
+${gradeData.feedback}
+\`\`\`
+
+${remainingAttempts === 0 ? '⚠️ **This was your final submission attempt.** If you need additional attempts, please contact the instructor.' : `ℹ️ You have **${remainingAttempts}** attempt(s) remaining. Push new commits to re-grade.`}
+
+---
+*Generated by GitHub Actions • ${new Date().toISOString()}*
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: comment
+            });
+
+      - name: Set check status
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const gradeData = JSON.parse(`${{ steps.parse_grade.outputs.GRADE }}`);
+            const conclusion = gradeData.score >= 75 ? 'success' : 'failure';
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Autograde',
+              head_sha: context.payload.pull_request.head.sha,
+              status: 'completed',
+              conclusion: conclusion,
+              output: {
+                title: `Score: ${gradeData.score}/${gradeData.max_score}`,
+                summary: `Your submission scored ${gradeData.score} out of ${gradeData.max_score} points.`
+              }
+            });
+
+  attempts-exhausted:
+    runs-on: ubuntu-latest
+    needs: check-attempts
+    if: needs.check-attempts.outputs.exhausted == 'true'
+
+    steps:
+      - name: Post exhausted message
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `## ⛔ Submission Attempts Exhausted
+
+You have already submitted **3 times**, which is the maximum allowed.
+
+**What to do next:**
+1. Review the feedback from your previous submissions
+2. If you believe there was a technical error, contact the instructor
+3. To request an override, add a comment explaining your situation and tag the instructor
+
+The instructor can add the \`override\` label to your PR to allow additional attempts.
+
+---
+*Generated by GitHub Actions • ${new Date().toISOString()}*
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: comment
+            });
